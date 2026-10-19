@@ -2,24 +2,41 @@
 
 > concessions bounded context: database (schema, seeds, migrations)
 
-Part of the **LMS Library** distributed system — team `lms-library`, Grupo 2.
-Governance and documentation live in [`library-docs`](https://github.com/code-corhuila/library-docs).
+Part of the **Cinesync Platform** distributed system — team `cinesync-platform`, Group 1.
+Governance and documentation live in [`csp-docs`](https://github.com/code-corhuila/csp-docs).
 
-## Branching
+## Purpose
 
-Three permanent branches. **None of them accepts a direct commit** — you enter through a child
-branch and leave through a Pull Request.
+This repository is the **only owner of the `concessions` schema** of the Cinesync Platform: its structure, seed data,
+roles and migrations. `csp-concessions-api` consumes the schema and never versions it (Norma 5.2.1, ADR-018).
 
+## Schema
+
+Every `V<n>` migration has its `U<n>` in `05_rollbacks/`.
+
+| Migration | What it creates |
+|---|---|
+| `V001` | The schema `concessions` |
+| `V002` | The roles `concessions_reader`, `concessions_writer` and `concessions_outbox_reader` (all `NOLOGIN`) |
+| `V003` | The grants: `concessions_writer` to the login user `concessions_app`, `concessions_outbox_reader` to `worker_app` |
+| `V004` | `product` (HU-CONCESSIONS-001): name, category, price in cents, stock and `DRAFT`/`PUBLISHED`/`INACTIVE` status |
+
+Folders follow the families of ADR-013 (`01_ddl` to `05_rollbacks`). The login users are created by
+`csp-infra-postgres`; the roles here carry permissions only.
+
+## Run the migrations
+
+The executor `concessions-db-migrate` (`deploy/compose.yml`) joins the `platform` network of `csp-infra-postgres`
+and runs before the API starts. Copy `.env.example` to `.env`, fill the values from the platform `.env`, then:
+
+```bash
+docker compose -f deploy/compose.yml --profile tooling run --rm concessions-db-migrate
 ```
-develop  <--PR--  feat/... fix/... chore/...
-qa       <--PR--  qa/...
-main     <--PR--  release/...  hotfix/...
-```
 
-Promotion happens **by re-application** (`git cherry-pick -x`), never by merging one permanent
-branch into another: `merge develop -> qa` and `merge qa -> main` do not exist in this model.
+Reversion applies the `U` scripts with `psql` from the highest number to the lowest; `U001` refuses to run while
+later objects or the roles of `V002` exist.
 
-`main` requires **1 approval from `ariel5253`**. On `develop` and `qa` the team sets its own review
-rule.
+## Verification
 
-Full policy: `00-governance/branching-policy.md` in `library-docs`.
+`.github/workflows/db-ci.yml` builds the schema from an empty database, checks that invalid products are refused,
+rolls everything back with the `U` scripts and applies the chain again.
