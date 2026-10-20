@@ -86,6 +86,18 @@ jobs:
             END;
             UPDATE concessions.product SET status = 'INACTIVE' WHERE name = 'Popcorn';
             INSERT INTO concessions.product (name, category, price) VALUES ('Popcorn', 'SNACK', 100);  -- allowed once the first is INACTIVE
+            BEGIN  -- a key that points to no product, and a key shorter than 8 characters
+              INSERT INTO concessions.product_idempotency_key (key, product_id, request_hash)
+                VALUES ('0123456789', gen_random_uuid(), 'h');
+              RAISE EXCEPTION 'a key of a product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN
+              INSERT INTO concessions.product_idempotency_key (key, product_id, request_hash)
+                SELECT 'short', id, 'h' FROM concessions.product LIMIT 1;
+              RAISE EXCEPTION 'a key shorter than 8 characters was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
             DELETE FROM concessions.product WHERE lower(name) = 'popcorn';
           END
           $$;

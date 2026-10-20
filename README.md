@@ -20,6 +20,7 @@ Every `V<n>` migration has its `U<n>` in `05_rollbacks/`.
 | `V002` | The roles `concessions_reader`, `concessions_writer` and `concessions_outbox_reader` (all `NOLOGIN`) |
 | `V003` | The grants: `concessions_writer` to the login user `concessions_app`, `concessions_outbox_reader` to `worker_app` |
 | `V004` | `product` (HU-CONCESSIONS-001): name, category, price in cents, stock and `DRAFT`/`PUBLISHED`/`INACTIVE` status |
+| `V005` | `product_idempotency_key` (one key per product, for the replay of `POST /products`, Norma 5.3.8) |
 
 Folders follow the families of ADR-013 (`01_ddl` to `05_rollbacks`). The login users are created by
 `csp-infra-postgres`; the roles here carry permissions only.
