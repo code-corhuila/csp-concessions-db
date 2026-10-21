@@ -21,6 +21,10 @@ Every `V<n>` migration has its `U<n>` in `05_rollbacks/`.
 | `V003` | The grants: `concessions_writer` to the login user `concessions_app`, `concessions_outbox_reader` to `worker_app` |
 | `V004` | `product` (HU-CONCESSIONS-001): name, category, price in cents, stock and `DRAFT`/`PUBLISHED`/`INACTIVE` status |
 | `V005` | `product_idempotency_key` (one key per product, for the replay of `POST /products`, Norma 5.3.8) |
+| `V006` | `combo` (HU-CONCESSIONS-002): name, description, price in cents and `DRAFT`/`PUBLISHED`/`INACTIVE` status |
+| `V007` | `combo_item`: one row per component product of a combo, with a positive quantity |
+| `V008` | `combo_idempotency_key` (one key per combo, for the replay of `POST /combos`, Norma 5.3.8) |
+| `V009` | The foreign keys of the combo tables, in `04_alter` (Annex A) |
 
 Folders follow the families of ADR-013 (`01_ddl` to `05_rollbacks`). The login users are created by
 `csp-infra-postgres`; the roles here carry permissions only.
