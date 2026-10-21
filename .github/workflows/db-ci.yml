@@ -103,6 +103,69 @@ jobs:
           $$;
           SQL
 
+          # The checks, keys and foreign keys of V006 to V009 (HU-CONCESSIONS-002): each invalid row is refused.
+          sql <<'SQL'
+          DO $$
+          DECLARE p uuid; c uuid;
+          BEGIN
+            INSERT INTO concessions.product (name, category, price) VALUES ('Combo base', 'SNACK', 10) RETURNING id INTO p;
+            INSERT INTO concessions.combo (name, price) VALUES ('Family', 0) RETURNING id INTO c;
+            INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, p, 2);
+            BEGIN  -- a blank name
+              INSERT INTO concessions.combo (name, price) VALUES ('  ', 1);
+              RAISE EXCEPTION 'a blank combo name was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative price
+              INSERT INTO concessions.combo (name, price) VALUES ('Cheap', -1);
+              RAISE EXCEPTION 'a negative combo price was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a status outside the lifecycle
+              INSERT INTO concessions.combo (name, price, status) VALUES ('Odd', 1, 'ACTIVE');
+              RAISE EXCEPTION 'an unknown combo status was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same name, in another case, among active rows
+              INSERT INTO concessions.combo (name, price) VALUES ('FAMILY', 1);
+              RAISE EXCEPTION 'a duplicated active combo name was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a zero quantity
+              UPDATE concessions.combo_item SET quantity = 0 WHERE combo_id = c;
+              RAISE EXCEPTION 'a zero quantity was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same product twice in one combo
+              INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, p, 1);
+              RAISE EXCEPTION 'a repeated component was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a component that is not a product
+              INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, gen_random_uuid(), 1);
+              RAISE EXCEPTION 'a component of a product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a key that points to no combo
+              INSERT INTO concessions.combo_idempotency_key (key, combo_id, request_hash)
+                VALUES ('0123456789', gen_random_uuid(), 'h');
+              RAISE EXCEPTION 'a key of a combo that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a product used by a combo cannot be deleted
+              DELETE FROM concessions.product WHERE id = p;
+              RAISE EXCEPTION 'a product used by a combo was deleted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            DELETE FROM concessions.combo WHERE id = c;  -- the items go with it
+            IF EXISTS (SELECT 1 FROM concessions.combo_item WHERE combo_id = c) THEN
+              RAISE EXCEPTION 'the items of a deleted combo remained';
+            END IF;
+            DELETE FROM concessions.product WHERE id = p;
+          END
+          $$;
+          SQL
+
           # U001 drops the whole schema, so it must refuse to run out of order: here the table still exists.
           if sql -f 05_rollbacks/01_ddl/01_schemas/U001__create_schema_concessions.sql; then
             echo "U001 ran with later objects still in the schema"; exit 1
