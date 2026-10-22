@@ -27,6 +27,13 @@ Every `V<n>` migration has its `U<n>` in `05_rollbacks/`.
 | `V009` | The foreign keys of the combo tables, in `04_alter` (Annex A) |
 | `V010` | `stock_movement` (HU-CONCESSIONS-003, ADR-043): immutable audit trail of every change to `product.available_stock`; the application role can only read and append |
 | `V011` | The foreign key of `stock_movement` to `product`, in `04_alter` (Annex A) |
+| `V012` | `concession_order` (HU-CONCESSIONS-004, ADR-045): the client's order, its status, idempotency key and one live order per reservation |
+| `V013` | `concession_order_item`: the lines with the name and unit price copied at creation |
+| `V014` | `stock_hold`: the stock reserved for one order (`HELD`, `COMMITTED`, `RELEASED`) |
+| `V015` | `stock_hold_item`: the product quantities of a hold, with combos expanded |
+| `V016` | `outbox_event`: the domain events, read by `csp-worker` with `SELECT` only (ADR-019) |
+| `V017` | `order_id` and `hold_id` on `stock_movement`, with their indexes, in `04_alter` |
+| `V018` | The foreign keys of the order tables and of the new `stock_movement` columns, in `04_alter` (Annex A) |
 
 Folders follow the families of ADR-013 (`01_ddl` to `05_rollbacks`). The login users are created by
 `csp-infra-postgres`; the roles here carry permissions only.
