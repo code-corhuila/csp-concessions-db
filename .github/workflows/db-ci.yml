@@ -230,6 +230,176 @@ jobs:
           $$;
           SQL
 
+          # The checks, keys, foreign keys and grants of V012 to V018 (HU-CONCESSIONS-004, ADR-045): each invalid row
+          # is refused, one live order per reservation, and the roles can do only what the service needs.
+          sql <<'SQL'
+          DO $$
+          DECLARE p uuid; o uuid; h uuid; u uuid := gen_random_uuid();
+          BEGIN
+            INSERT INTO concessions.product (name, category, price) VALUES ('Order base', 'SNACK', 10) RETURNING id INTO p;
+            INSERT INTO concessions.concession_order (user_id, reservation_id, total_amount, status, idempotency_key, request_hash)
+              VALUES (u, gen_random_uuid(), 100, 'RESERVED', '0123456789', 'h') RETURNING id INTO o;
+            BEGIN  -- a negative total
+              INSERT INTO concessions.concession_order (user_id, total_amount, status, idempotency_key, request_hash)
+                VALUES (u, -1, 'RESERVED', 'abcdefghij', 'h');
+              RAISE EXCEPTION 'a negative order total was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a status outside the lifecycle
+              INSERT INTO concessions.concession_order (user_id, total_amount, status, idempotency_key, request_hash)
+                VALUES (u, 1, 'PAID', 'abcdefghij', 'h');
+              RAISE EXCEPTION 'an unknown order status was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a key shorter than 8 characters
+              INSERT INTO concessions.concession_order (user_id, total_amount, status, idempotency_key, request_hash)
+                VALUES (u, 1, 'RESERVED', 'short', 'h');
+              RAISE EXCEPTION 'a short order key was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same key of the same user
+              INSERT INTO concessions.concession_order (user_id, total_amount, status, idempotency_key, request_hash)
+                VALUES (u, 1, 'RESERVED', '0123456789', 'h');
+              RAISE EXCEPTION 'a repeated key of the same user was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            -- the same key of another user is another order
+            INSERT INTO concessions.concession_order (user_id, total_amount, status, idempotency_key, request_hash)
+              VALUES (gen_random_uuid(), 1, 'RESERVED', '0123456789', 'h');
+            BEGIN  -- a second live order for the same reservation
+              INSERT INTO concessions.concession_order (user_id, reservation_id, total_amount, status, idempotency_key, request_hash)
+                SELECT u, reservation_id, 1, 'RESERVED', 'klmnopqrst', 'h' FROM concessions.concession_order WHERE id = o;
+              RAISE EXCEPTION 'two live orders for one reservation were accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            UPDATE concessions.concession_order SET status = 'CANCELLED' WHERE id = o;
+            INSERT INTO concessions.concession_order (user_id, reservation_id, total_amount, status, idempotency_key, request_hash)
+              SELECT u, reservation_id, 1, 'RESERVED', 'klmnopqrst', 'h' FROM concessions.concession_order WHERE id = o;  -- allowed once the first is CANCELLED
+            INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+              VALUES (o, 'PRODUCT', p, 'Order base', 10, 2);
+            BEGIN  -- a zero quantity
+              INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+                VALUES (o, 'COMBO', gen_random_uuid(), 'Combo', 10, 0);
+              RAISE EXCEPTION 'a zero item quantity was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative price snapshot
+              INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+                VALUES (o, 'COMBO', gen_random_uuid(), 'Combo', -1, 1);
+              RAISE EXCEPTION 'a negative price snapshot was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- an item type outside the list
+              INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+                VALUES (o, 'DRINK', gen_random_uuid(), 'Drink', 1, 1);
+              RAISE EXCEPTION 'an unknown item type was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same line twice
+              INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+                VALUES (o, 'PRODUCT', p, 'Order base', 10, 1);
+              RAISE EXCEPTION 'a repeated order line was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a line of an order that does not exist
+              INSERT INTO concessions.concession_order_item (order_id, item_type, item_id, item_name_snapshot, unit_price_snapshot, quantity)
+                VALUES (gen_random_uuid(), 'PRODUCT', p, 'Order base', 10, 1);
+              RAISE EXCEPTION 'a line of an order that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            INSERT INTO concessions.stock_hold (order_id, status) VALUES (o, 'HELD') RETURNING id INTO h;
+            BEGIN  -- a hold status outside the list
+              UPDATE concessions.stock_hold SET status = 'EXPIRED' WHERE id = h;
+              RAISE EXCEPTION 'an unknown hold status was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a second hold for the same order
+              INSERT INTO concessions.stock_hold (order_id, status) VALUES (o, 'HELD');
+              RAISE EXCEPTION 'two holds for one order were accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a hold of an order that does not exist
+              INSERT INTO concessions.stock_hold (order_id, status) VALUES (gen_random_uuid(), 'HELD');
+              RAISE EXCEPTION 'a hold of an order that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            INSERT INTO concessions.stock_hold_item (hold_id, product_id, quantity) VALUES (h, p, 2);
+            BEGIN  -- a zero quantity
+              UPDATE concessions.stock_hold_item SET quantity = 0 WHERE hold_id = h;
+              RAISE EXCEPTION 'a zero held quantity was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same product twice in one hold
+              INSERT INTO concessions.stock_hold_item (hold_id, product_id, quantity) VALUES (h, p, 1);
+              RAISE EXCEPTION 'a repeated held product was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a held product that does not exist
+              INSERT INTO concessions.stock_hold_item (hold_id, product_id, quantity) VALUES (h, gen_random_uuid(), 1);
+              RAISE EXCEPTION 'a held product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            -- A reserve and its release leave movements that point at the order and the hold.
+            INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by, order_id, hold_id)
+              VALUES (p, -2, 0, 'RESERVE', u, o, h);
+            BEGIN  -- a movement of an order that does not exist
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by, order_id)
+                VALUES (p, -1, 0, 'RESERVE', u, gen_random_uuid());
+              RAISE EXCEPTION 'a movement of an order that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a movement of a hold that does not exist
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by, hold_id)
+                VALUES (p, -1, 0, 'RESERVE', u, gen_random_uuid());
+              RAISE EXCEPTION 'a movement of a hold that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a product held by an order cannot be deleted
+              DELETE FROM concessions.product WHERE id = p;
+              RAISE EXCEPTION 'a product held by an order was deleted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            -- The outbox: the writer appends and purges, never rewrites; csp-worker reads it and nothing else (ADR-019).
+            INSERT INTO concessions.outbox_event (aggregate_type, aggregate_id, event_type, payload)
+              VALUES ('ConcessionOrder', o, 'ConcessionStockReserved', '{}'::jsonb);
+            IF NOT has_table_privilege('concessions_writer', 'concessions.outbox_event', 'INSERT')
+               OR NOT has_table_privilege('concessions_writer', 'concessions.outbox_event', 'DELETE')
+               OR has_table_privilege('concessions_writer', 'concessions.outbox_event', 'UPDATE') THEN
+              RAISE EXCEPTION 'the writer role has the wrong privileges on the outbox';
+            END IF;
+            IF NOT has_table_privilege('concessions_outbox_reader', 'concessions.outbox_event', 'SELECT')
+               OR has_table_privilege('concessions_outbox_reader', 'concessions.outbox_event', 'INSERT')
+               OR has_table_privilege('concessions_outbox_reader', 'concessions.concession_order', 'SELECT') THEN
+              RAISE EXCEPTION 'the outbox reader role has the wrong privileges';
+            END IF;
+            -- Orders and holds change status; their lines, snapshots and movements are append-only for the application.
+            IF NOT has_table_privilege('concessions_writer', 'concessions.concession_order', 'UPDATE')
+               OR has_table_privilege('concessions_writer', 'concessions.concession_order', 'DELETE')
+               OR has_table_privilege('concessions_writer', 'concessions.concession_order_item', 'UPDATE')
+               OR has_table_privilege('concessions_writer', 'concessions.stock_hold_item', 'UPDATE') THEN
+              RAISE EXCEPTION 'the writer role has the wrong privileges on the order tables';
+            END IF;
+            -- Every foreign key of the schema has a complete index that starts with its columns (Annex A).
+            IF EXISTS (
+              SELECT 1 FROM pg_constraint c
+              WHERE c.contype = 'f' AND c.connamespace = 'concessions'::regnamespace
+                AND NOT EXISTS (
+                  SELECT 1 FROM pg_index i
+                  WHERE i.indrelid = c.conrelid AND i.indpred IS NULL
+                    AND (string_to_array(i.indkey::text, ' '))[1:cardinality(c.conkey)] = string_to_array(array_to_string(c.conkey, ' '), ' '))) THEN
+              RAISE EXCEPTION 'a foreign key of the concessions schema has no complete index';
+            END IF;
+            DELETE FROM concessions.outbox_event WHERE aggregate_id = o;
+            DELETE FROM concessions.stock_movement WHERE product_id = p;
+            DELETE FROM concessions.stock_hold_item WHERE hold_id = h;
+            DELETE FROM concessions.stock_hold WHERE id = h;
+            DELETE FROM concessions.concession_order_item WHERE order_id = o;
+            DELETE FROM concessions.concession_order WHERE user_id IN (u) OR idempotency_key = '0123456789';
+            DELETE FROM concessions.product WHERE id = p;
+          END
+          $$;
+          SQL
+
           # U001 drops the whole schema, so it must refuse to run out of order: here the table still exists.
           if sql -f 05_rollbacks/01_ddl/01_schemas/U001__create_schema_concessions.sql; then
             echo "U001 ran with later objects still in the schema"; exit 1
