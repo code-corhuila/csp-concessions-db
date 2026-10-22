@@ -1,0 +1,259 @@
+name: Database rebuild
+
+# The whole migration chain must build the schema from an EMPTY database, every
+# rollback script must undo it, and the chain must apply again afterwards. If the
+# only place the schema works is where it was patched by hand, the next
+# environment cannot exist.
+
+on:
+  pull_request:
+    branches: [develop, qa, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: csp
+          POSTGRES_USER: ci_admin
+          POSTGRES_PASSWORD: ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci_admin -d csp"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      PGPASSWORD: ci-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply, roll everything back, apply again
+        run: |
+          fw() {
+            docker run --rm --network host -v "$PWD:/workspace:ro" \
+              -e FLYWAY_URL=jdbc:postgresql://localhost:5432/csp \
+              -e FLYWAY_USER=ci_admin -e FLYWAY_PASSWORD=ci-only \
+              flyway/flyway:11.20 -workingDirectory=/workspace -configFiles=flyway.toml "$@"
+          }
+          sql() { psql -v ON_ERROR_STOP=1 -h localhost -U ci_admin -d csp "$@"; }
+
+          # csp-infra-postgres creates the login users before any executor runs (Annex J.5.5).
+          sql -c "CREATE ROLE concessions_app LOGIN PASSWORD 'ci-only'; CREATE ROLE worker_app LOGIN PASSWORD 'ci-only';"
+
+          fw migrate
+          fw migrate | tee second.txt
+          grep -q "No migration necessary" second.txt || { echo "second migrate applied changes: not incremental"; exit 1; }
+
+          # The checks of V004 keep an invalid product out of the table (HU-CONCESSIONS-001, scenario 2):
+          # each invalid row must be refused by the database. The block leaves no data behind.
+          sql <<'SQL'
+          DO $$
+          BEGIN
+            INSERT INTO concessions.product (name, category, price) VALUES ('Popcorn', 'SNACK', 0);
+            BEGIN  -- a blank name
+              INSERT INTO concessions.product (name, category, price) VALUES ('   ', 'SNACK', 100);
+              RAISE EXCEPTION 'a blank name was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative price
+              INSERT INTO concessions.product (name, category, price) VALUES ('Soda', 'DRINK', -1);
+              RAISE EXCEPTION 'a negative price was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative stock
+              INSERT INTO concessions.product (name, category, price, available_stock) VALUES ('Soda', 'DRINK', 1, -1);
+              RAISE EXCEPTION 'a negative stock was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a status outside the lifecycle
+              INSERT INTO concessions.product (name, category, price, status) VALUES ('Soda', 'DRINK', 1, 'ACTIVE');
+              RAISE EXCEPTION 'an unknown status was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same name, in another case, among active rows
+              INSERT INTO concessions.product (name, category, price) VALUES ('POPCORN', 'SNACK', 100);
+              RAISE EXCEPTION 'a duplicated active name was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            UPDATE concessions.product SET status = 'INACTIVE' WHERE name = 'Popcorn';
+            INSERT INTO concessions.product (name, category, price) VALUES ('Popcorn', 'SNACK', 100);  -- allowed once the first is INACTIVE
+            BEGIN  -- a key that points to no product, and a key shorter than 8 characters
+              INSERT INTO concessions.product_idempotency_key (key, product_id, request_hash)
+                VALUES ('0123456789', gen_random_uuid(), 'h');
+              RAISE EXCEPTION 'a key of a product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN
+              INSERT INTO concessions.product_idempotency_key (key, product_id, request_hash)
+                SELECT 'short', id, 'h' FROM concessions.product LIMIT 1;
+              RAISE EXCEPTION 'a key shorter than 8 characters was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            DELETE FROM concessions.product WHERE lower(name) = 'popcorn';
+          END
+          $$;
+          SQL
+
+          # The checks, keys and foreign keys of V006 to V009 (HU-CONCESSIONS-002): each invalid row is refused.
+          sql <<'SQL'
+          DO $$
+          DECLARE p uuid; c uuid;
+          BEGIN
+            INSERT INTO concessions.product (name, category, price) VALUES ('Combo base', 'SNACK', 10) RETURNING id INTO p;
+            INSERT INTO concessions.combo (name, price) VALUES ('Family', 0) RETURNING id INTO c;
+            INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, p, 2);
+            BEGIN  -- a blank name
+              INSERT INTO concessions.combo (name, price) VALUES ('  ', 1);
+              RAISE EXCEPTION 'a blank combo name was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative price
+              INSERT INTO concessions.combo (name, price) VALUES ('Cheap', -1);
+              RAISE EXCEPTION 'a negative combo price was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a status outside the lifecycle
+              INSERT INTO concessions.combo (name, price, status) VALUES ('Odd', 1, 'ACTIVE');
+              RAISE EXCEPTION 'an unknown combo status was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same name, in another case, among active rows
+              INSERT INTO concessions.combo (name, price) VALUES ('FAMILY', 1);
+              RAISE EXCEPTION 'a duplicated active combo name was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a zero quantity
+              UPDATE concessions.combo_item SET quantity = 0 WHERE combo_id = c;
+              RAISE EXCEPTION 'a zero quantity was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- the same product twice in one combo
+              INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, p, 1);
+              RAISE EXCEPTION 'a repeated component was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a component that is not a product
+              INSERT INTO concessions.combo_item (combo_id, product_id, quantity) VALUES (c, gen_random_uuid(), 1);
+              RAISE EXCEPTION 'a component of a product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a key that points to no combo
+              INSERT INTO concessions.combo_idempotency_key (key, combo_id, request_hash)
+                VALUES ('0123456789', gen_random_uuid(), 'h');
+              RAISE EXCEPTION 'a key of a combo that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a product used by a combo cannot be deleted
+              DELETE FROM concessions.product WHERE id = p;
+              RAISE EXCEPTION 'a product used by a combo was deleted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            DELETE FROM concessions.combo WHERE id = c;  -- the items go with it
+            IF EXISTS (SELECT 1 FROM concessions.combo_item WHERE combo_id = c) THEN
+              RAISE EXCEPTION 'the items of a deleted combo remained';
+            END IF;
+            DELETE FROM concessions.product WHERE id = p;
+          END
+          $$;
+          SQL
+
+          # The checks, key and foreign key of V010 and V011 (HU-CONCESSIONS-003): each invalid row is refused and
+          # the application role can add and read movements but not change or delete them.
+          sql <<'SQL'
+          DO $$
+          DECLARE p uuid;
+          BEGIN
+            INSERT INTO concessions.product (name, category, price) VALUES ('Stock base', 'SNACK', 10) RETURNING id INTO p;
+            INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by)
+              VALUES (p, 5, 5, 'RECEIPT', gen_random_uuid());
+            BEGIN  -- a zero delta
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by)
+                VALUES (p, 0, 5, 'ADJUSTMENT', gen_random_uuid());
+              RAISE EXCEPTION 'a zero delta was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a negative balance
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by)
+                VALUES (p, -9, -4, 'ADJUSTMENT', gen_random_uuid());
+              RAISE EXCEPTION 'a negative balance was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a type outside the list
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by)
+                VALUES (p, 1, 6, 'GIFT', gen_random_uuid());
+              RAISE EXCEPTION 'an unknown movement type was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            BEGIN  -- a key shorter than 8 characters
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, idempotency_key, created_by)
+                VALUES (p, 1, 6, 'RECEIPT', 'short', gen_random_uuid());
+              RAISE EXCEPTION 'a short idempotency key was accepted';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, idempotency_key, created_by)
+              VALUES (p, 1, 6, 'RECEIPT', '0123456789', gen_random_uuid());
+            BEGIN  -- the same key twice
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, idempotency_key, created_by)
+                VALUES (p, 1, 7, 'RECEIPT', '0123456789', gen_random_uuid());
+              RAISE EXCEPTION 'a repeated idempotency key was accepted';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- a movement of a product that does not exist
+              INSERT INTO concessions.stock_movement (product_id, quantity_delta, balance_after, movement_type, created_by)
+                VALUES (gen_random_uuid(), 1, 1, 'RECEIPT', gen_random_uuid());
+              RAISE EXCEPTION 'a movement of a product that does not exist was accepted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            BEGIN  -- a product with history cannot be deleted
+              DELETE FROM concessions.product WHERE id = p;
+              RAISE EXCEPTION 'a product with stock movements was deleted';
+            EXCEPTION WHEN foreign_key_violation THEN NULL;
+            END;
+            -- The trail is immutable for the application: it reads and appends, nothing else.
+            IF NOT has_table_privilege('concessions_writer', 'concessions.stock_movement', 'INSERT')
+               OR has_table_privilege('concessions_writer', 'concessions.stock_movement', 'UPDATE')
+               OR has_table_privilege('concessions_writer', 'concessions.stock_movement', 'DELETE') THEN
+              RAISE EXCEPTION 'the writer role can change the stock movement trail';
+            END IF;
+            DELETE FROM concessions.stock_movement WHERE product_id = p;  -- the executor may clean up its test data
+            DELETE FROM concessions.product WHERE id = p;
+          END
+          $$;
+          SQL
+
+          # U001 drops the whole schema, so it must refuse to run out of order: here the table still exists.
+          if sql -f 05_rollbacks/01_ddl/01_schemas/U001__create_schema_concessions.sql; then
+            echo "U001 ran with later objects still in the schema"; exit 1
+          fi
+          test "$(sql -tAc "select count(*) from pg_tables where schemaname = 'concessions'")" -gt 1 \
+            || { echo "the refused U001 dropped something"; exit 1; }
+
+          # Flyway Community does not undo. The rollback of each V<n> is U<n> in
+          # 05_rollbacks/, applied here from the highest version down. The control
+          # table lives in the schema (Annex J.6) and is dropped before U001.
+          for f in $(find 05_rollbacks -name 'U*.sql' | awk -F/ '{print $NF" "$0}' | sort -r | cut -d' ' -f2); do
+            case "$f" in
+              # Every table is gone but the roles of V002 are not: U001 must still refuse.
+              *U002__*) if sql -f 05_rollbacks/01_ddl/01_schemas/U001__create_schema_concessions.sql; then
+                          echo "U001 ran with the roles of V002 still present"; exit 1
+                        fi;;
+              *U001__*) sql -c "DROP TABLE IF EXISTS concessions.flyway_schema_history";;
+            esac
+            echo "rollback $f"; sql -f "$f"
+          done
+          test "$(sql -tAc "select count(*) from pg_namespace where nspname = 'concessions'")" = 0 \
+            || { echo "rollbacks left the schema behind"; exit 1; }
+          test "$(sql -tAc "select count(*) from pg_roles where rolname in ('concessions_reader', 'concessions_writer', 'concessions_outbox_reader')")" = 0 \
+            || { echo "rollbacks left roles behind"; exit 1; }
+
+          fw migrate
+          fw validate
