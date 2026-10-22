@@ -25,6 +25,8 @@ Every `V<n>` migration has its `U<n>` in `05_rollbacks/`.
 | `V007` | `combo_item`: one row per component product of a combo, with a positive quantity |
 | `V008` | `combo_idempotency_key` (one key per combo, for the replay of `POST /combos`, Norma 5.3.8) |
 | `V009` | The foreign keys of the combo tables, in `04_alter` (Annex A) |
+| `V010` | `stock_movement` (HU-CONCESSIONS-003, ADR-043): immutable audit trail of every change to `product.available_stock`; the application role can only read and append |
+| `V011` | The foreign key of `stock_movement` to `product`, in `04_alter` (Annex A) |
 
 Folders follow the families of ADR-013 (`01_ddl` to `05_rollbacks`). The login users are created by
 `csp-infra-postgres`; the roles here carry permissions only.
