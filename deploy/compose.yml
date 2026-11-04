@@ -1,0 +1,23 @@
+# Migration executor of csp-concessions-db (Annex J). This file defines NO database service and NO volume:
+# the single PostgreSQL instance of the environment belongs to csp-infra-postgres, which composes this
+# file with `include` and joins the same `platform` network. Run the executor before the API starts.
+name: csp-concessions-db
+
+services:
+  concessions-db-migrate:
+    image: flyway/flyway:11.20
+    profiles: [tooling]
+    volumes:
+      - ../:/workspace:ro
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${PG_DATABASE:?set PG_DATABASE}
+      FLYWAY_USER: ${CONCESSIONS_DB_USER:?set CONCESSIONS_DB_USER}
+      FLYWAY_PASSWORD: ${CONCESSIONS_DB_PASSWORD:?set CONCESSIONS_DB_PASSWORD}
+    entrypoint: ["flyway", "-workingDirectory=/workspace", "-configFiles=flyway.toml"]
+    command: ["migrate"]
+    networks: [platform]
+
+networks:
+  platform:
+    name: platform
+    external: true
