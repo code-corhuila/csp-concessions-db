@@ -372,6 +372,27 @@ jobs:
                OR has_table_privilege('concessions_outbox_reader', 'concessions.concession_order', 'SELECT') THEN
               RAISE EXCEPTION 'the outbox reader role has the wrong privileges';
             END IF;
+            -- The inbox: one row per event, the second delivery of an eventId stores nothing (ADR-063).
+            INSERT INTO concessions.inbox_event (event_id, event_type)
+              VALUES ('00000000-0000-0000-0000-0000000000a5', 'BookingConfirmed');
+            BEGIN  -- the same eventId twice
+              INSERT INTO concessions.inbox_event (event_id, event_type)
+                VALUES ('00000000-0000-0000-0000-0000000000a5', 'BookingConfirmed');
+              RAISE EXCEPTION 'a repeated eventId was accepted by the inbox';
+            EXCEPTION WHEN unique_violation THEN NULL;
+            END;
+            BEGIN  -- an event type outside the list
+              INSERT INTO concessions.inbox_event (event_id, event_type) VALUES (gen_random_uuid(), 'SeatHeld');
+              RAISE EXCEPTION 'an unknown event type was accepted by the inbox';
+            EXCEPTION WHEN check_violation THEN NULL;
+            END;
+            IF NOT has_table_privilege('concessions_writer', 'concessions.inbox_event', 'INSERT')
+               OR NOT has_table_privilege('concessions_writer', 'concessions.inbox_event', 'DELETE')
+               OR has_table_privilege('concessions_writer', 'concessions.inbox_event', 'UPDATE')
+               OR has_table_privilege('concessions_outbox_reader', 'concessions.inbox_event', 'SELECT') THEN
+              RAISE EXCEPTION 'the inbox has the wrong privileges';
+            END IF;
+            DELETE FROM concessions.inbox_event WHERE event_id = '00000000-0000-0000-0000-0000000000a5';
             -- Orders and holds change status; their lines, snapshots and movements are append-only for the application.
             IF NOT has_table_privilege('concessions_writer', 'concessions.concession_order', 'UPDATE')
                OR has_table_privilege('concessions_writer', 'concessions.concession_order', 'DELETE')
