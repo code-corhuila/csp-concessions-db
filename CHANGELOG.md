@@ -4,6 +4,9 @@
 
 First release of `csp-concessions-db` in `main` with the schema of the service.
 
+### Fixed
+- The migration executor retries the connection (`FLYWAY_CONNECT_RETRIES`) while the instance starts, as the executor of `csp-booking-db` does, so it does not fail when the platform starts in one `up` (HU-CONCESSIONS-004).
+
 ### Added
 - HU-CONCESSIONS-001: schema `concessions`, its `NOLOGIN` roles and grants, `product` and `product_idempotency_key` (V001 to V005, each with its rollback).
 - HU-CONCESSIONS-002: `combo`, `combo_item` and `combo_idempotency_key` with their rollbacks, and the foreign keys of the combo tables in `04_alter` (V006 to V009).
