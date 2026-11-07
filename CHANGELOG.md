@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- The migration executor retries the connection (`FLYWAY_CONNECT_RETRIES`) while the instance starts, as the executor of `csp-booking-db` does, so it does not fail when the platform starts in one `up` (HU-CONCESSIONS-004).
+
 ### Added
 - `inbox_event` (V019) with its rollback and CI checks: one row per reservation event already applied, keyed by `eventId` (HU-CONCESSIONS-005, ADR-063).
 - `concession_order`, `concession_order_item`, `stock_hold`, `stock_hold_item` and `outbox_event` (V012 to V016), `order_id` and `hold_id` on `stock_movement` (V017) and the foreign keys of all of them in `04_alter` (V018), with their rollbacks (U012 to U018), and rebuild CI checks for their constraints, grants and foreign key indexes (HU-CONCESSIONS-004).
